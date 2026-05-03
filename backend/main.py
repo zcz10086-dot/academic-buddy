@@ -292,6 +292,87 @@ async def delete_topic(topic_id: int):
             return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="选题报告未找到")
 
+# ---------- Integrity Check (Phase 3) ----------
+
+INTEGRITY_PROMPT = """你是一个学术诚信专家。你的工作是判断一段学术写作行为是否构成学术不端。
+
+给定内容：
+{text}
+
+用户意图：{intent}
+
+学校政策：{policy_name}
+- 允许范围：{allow}
+- 禁止范围：{forbid}
+
+请从以下维度分析：
+1. 这段内容/行为是否违反该学校政策
+2. 风险等级：safe（安全）/ edge（边缘，建议咨询导师）/ risk（违规风险高）
+3. 风险分数：0-100
+4. 具体原因（引用政策相关条款）
+5. 建议操作
+
+输出严格JSON格式：
+{{
+  "risk_level": "safe/edge/risk",
+  "risk_score": 0-100,
+  "explanation": "详细分析原因",
+  "suggestion": "具体建议操作",
+  "policy_ref": "引用的政策原文"
+}}
+"""
+
+@app.post("/api/integrity/check")
+async def integrity_check(data: dict):
+    """AI边界裁判：判断一段学术行为是否违规"""
+    text = data.get("text", "")
+    intent = data.get("intent", "其他")
+    school = data.get("school_policy", "general")
+
+    # 加载学校政策
+    policy_path = Path(__file__).parent / "data" / "school_policies.json"
+    policies = {}
+    if policy_path.exists():
+        with open(policy_path) as f:
+            policies = json.load(f)
+    policy = policies.get(school, policies.get("general", {}))
+
+    if not text.strip():
+        return {
+            "risk_level": "edge",
+            "risk_score": 50,
+            "explanation": "没有提供待检测的文本。请选中一段论文内容后再试。",
+            "suggestion": "请先选中需要检测的文本段落",
+            "policy_ref": ""
+        }
+
+    from llm_service import call_llm
+    prompt_text = INTEGRITY_PROMPT.format(
+        text=text[:2000],
+        intent=intent,
+        policy_name=policy.get("name", "通用指南"),
+        allow=policy.get("allow", "通用"),
+        forbid=policy.get("forbid", "通用"),
+    )
+    sp = "你是一个学术诚信专家。输出严格JSON格式的判断。"
+    raw = call_llm(prompt_text, max_tokens=1000, system_prompt=sp)
+
+    if raw:
+        try:
+            result = json.loads(raw)
+        except:
+            result = {}
+    else:
+        result = {}
+
+    return {
+        "risk_level": result.get("risk_level", "edge"),
+        "risk_score": result.get("risk_score", 50),
+        "explanation": result.get("explanation", "无法判断，建议咨询导师或查阅学校政策"),
+        "suggestion": result.get("suggestion", "建议咨询导师"),
+        "policy_ref": result.get("policy_ref", policy.get("source", "")),
+    }
+
 # ---------- Paper Reading Routes (Phase 2) ----------
 try:
     from paper_routes import router as paper_router
